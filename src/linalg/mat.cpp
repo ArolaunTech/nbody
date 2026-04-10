@@ -38,3 +38,19 @@ std::array<std::array<double, 3>, 3> inv3(const std::array<std::array<double, 3>
 
 	return inverse;
 }
+
+std::array<double, 3> mxv3(const std::array<std::array<double, 3>, 3>& m, const std::array<double, 3>& v) {
+	std::array<double, 3> out;
+
+	for (int i = 0; i < 3; i++) {
+		out[i] = 0;
+	}
+
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			out[i] += m[i][j] * v[j];
+		}
+	}
+
+	return out;
+}

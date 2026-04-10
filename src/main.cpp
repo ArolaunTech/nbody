@@ -12,7 +12,9 @@
 
 #include "ephem/ephem.h"
 #include "physics/de.h"
+#include "physics/gravity.h"
 #include "linalg/mat.h"
+#include "linalg/vector.h"
 
 std::array<double, 6> getmoonejecstate(double lat, double lon, double et, double heading, double ejecvel) {
 	double pos[3];
@@ -42,98 +44,6 @@ std::array<double, 6> getmoonejecstate(double lat, double lon, double et, double
 		pos[0], pos[1], pos[2],
 		state[3] + ejecvel * dir[0], state[4] + ejecvel * dir[1], state[5] + ejecvel * dir[2]
 	};
-}
-
-std::array<double, 3> getgravaccel(const std::array<double, 3>& x, int id, double et) {
-	const std::unordered_map<int, double> GMs = { // Horizons values, km^3 s^-2
-		{ 10, 1.3271244004127942E+11},
-		{  1, 2.2031868551400003E+04},
-        {  2, 3.2485859200000000E+05},
-        {301, 4.9028001184575496E+03},
-        {399, 3.9860043550702266E+05},
-        {  4, 4.2828375815756102E+04},
-        {  5, 1.2671276409999998E+08},
-        {  6, 3.7940584841799997E+07},
-        {  7, 5.7945563999999985E+06},
-        {  8, 6.8365271005803989E+06},
-        {  9, 9.7550000000000000E+02}
-	};
-
-	double state[6];
-
-	getstate(id, et, state);
-
-	std::array<double, 3> dx = {x[0] - state[0], x[1] - state[1], x[2] - state[2]};
-
-	double dist = std::sqrt(dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2]);
-
-	double grav = GMs.at(id) / dist / dist;
-
-	double fdir[3] = {0, 0, 0};
-
-	// Add perturbations if Earth (effects are insignicant from other bodies)
-	if (id == 399) {
-		// Earth gravity model (J2 only)
-		const double RE = 6378.135;
-		const double J2 = 0.00108262545;
-		double C = GMs.at(id) * J2 * RE * RE;
-
-		double rotate[3][3];
-		pxform_c("ITRF93", "ECLIPJ2000", et, rotate);
-
-		double pole[3] = {rotate[0][2], rotate[1][2], rotate[2][2]};
-
-		double z = pole[0] * dx[0] + pole[1] * dx[1] + pole[2] * dx[2];
-		
-		double xdir[3] = {dx[0] - z * pole[0], dx[1] - z * pole[1], dx[2] - z * pole[2]};
-
-		double x = std::sqrt(xdir[0] * xdir[0] + xdir[1] * xdir[1] + xdir[2] * xdir[2]);
-
-		xdir[0] /= x;
-		xdir[1] /= x;
-		xdir[2] /= x;
-
-		for (int i = 0; i < 3; i++) {
-			fdir[i] = 
-				3 * z / std::pow(dist, 5) * pole[i] + 
-				(1.5 / std::pow(dist, 5) - 7.5 * z * z / std::pow(dist, 7)) * dx[i];
-		}
-
-		fdir[0] *= -C;
-		fdir[1] *= -C;
-		fdir[2] *= -C;
-	}
-
-	return std::array<double, 3>{-dx[0] * grav / dist + fdir[0], -dx[1] * grav / dist + fdir[1], -dx[2] * grav / dist + fdir[2]};
-}
-
-std::array<double, 3> gettotalgravaccel(const std::array<double, 3>& x, double et) {
-	const int NBODIES = 11;
-
-	const int ids[NBODIES] = {
-		10,  // Sun
-		1,   // Mercury
-		2,   // Venus
-		301, // Moon
-		399, // Earth
-		4,   // Mars barycenter
-		5,   // Jupiter barycenter
-		6,   // Saturn barycenter
-		7,   // Uranus barycenter
-		8,   // Neptune barycenter
-		9    // Pluto barycenter
-	};
-
-	double ax = 0, ay = 0, az = 0;
-	for (int i = 0; i < NBODIES; i++) {
-		std::array<double, 3> grav = getgravaccel(x, ids[i], et);
-
-		ax += grav[0];
-		ay += grav[1];
-		az += grav[2];
-	}
-
-	return std::array<double, 3>{ax, ay, az};
 }
 
 std::vector<double> fsimple(const std::vector<double> & y) { // Depot differential equation, only considers gravity
@@ -242,18 +152,6 @@ std::array<double, 6> stateattime(const std::vector<std::vector<double> >& orbit
 	};
 }
 
-double dot (double* a, double* b) {
-	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-double distance(double* a, double* b) {
-	return std::sqrt(
-		(a[0] - b[0]) * (a[0] - b[0]) + 
-		(a[1] - b[1]) * (a[1] - b[1]) + 
-		(a[2] - b[2]) * (a[2] - b[2])
-	);
-}
-
 std::array<std::array<double, 6>, 6> estimatestatetransmatrix(
 	double t0, double t1, const std::array<double, 6>& state0, int N
 ) {
@@ -275,6 +173,94 @@ std::array<std::array<double, 6>, 6> estimatestatetransmatrix(
 
 		state0perturbed[i] -= epsilon[i];
 	}
+
+	return out;
+}
+
+std::array<double, 3> target(const std::array<double, 6>& state0, const std::array<double, 6>& state1, double t0, double t1) {
+	std::array<double, 6> state0burn = state0;
+
+	for (int it = 0; it < 50; it++) {
+		std::array<double, 6> res = propagateNbody(state0burn, t0, t1, 250, METHOD_DOPRI8);
+
+		std::array<std::array<double, 6>, 6> phi = estimatestatetransmatrix(t0, t1, state0burn, 250);
+		std::array<std::array<double, 3>, 3> phi12;
+
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) {
+				phi12[i][j] = phi[i][j + 3];
+			}
+		}
+
+		std::array<std::array<double, 3>, 3> phi12inv = inv3(phi12);
+		std::array<double, 3> deltas;
+
+		for (int i = 0; i < 3; i++) {
+			deltas[i] = 
+				phi12inv[i][0] * (state1[0] - res[0]) +
+				phi12inv[i][1] * (state1[1] - res[1]) +
+				phi12inv[i][2] * (state1[2] - res[2]);
+		}
+
+		double mag = std::sqrt(deltas[0] * deltas[0] + deltas[1] * deltas[1] + deltas[2] * deltas[2]);
+		double mult = mag < 0.01 ? 1 : 0.01 / mag;
+
+		for (int i = 0; i < 3; i++) {
+			state0burn[i + 3] += deltas[i] * mult;
+		}
+
+		if (mag < 1e-10) break;
+	}
+
+	return std::array<double, 3>{state0burn[3] - state0[3], state0burn[4] - state0[4], state0burn[5] - state0[5]};
+}
+
+std::array<std::array<double, 3>, 2> targetprimer(
+	const std::array<double, 3>& p0, 
+	const std::array<double, 3>& p1,
+	const std::array<double, 6>& state0,
+	double t0,
+	double t1
+) {
+	// Computes primer derivatives at start and end points.
+
+	std::array<std::array<double, 6>, 6> phi = estimatestatetransmatrix(t0, t1, state0, 250);
+	std::array<std::array<double, 3>, 3> phi11, phi12, phi21, phi22;
+	std::array<double, 3> prod, prod2, dpburn1;
+
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			phi11[i][j] = phi[i][j];
+			phi12[i][j] = phi[i][j + 3];
+			phi21[i][j] = phi[i + 3][j];
+			phi22[i][j] = phi[i + 3][j + 3];
+		}
+	}
+
+	std::array<std::array<double, 3>, 3> phi12inv = inv3(phi12);
+
+	prod = mxv3(phi11, p0);
+
+	for (int i = 0; i < 3; i++) {
+		prod[i] = p1[i] - prod[i];
+	}
+
+	prod2 = mxv3(phi12inv, prod);
+
+	for (int i = 0; i < 3; i++) {
+		dpburn1[i] = 
+			phi21[i][0] * p0[0] + 
+			phi21[i][1] * p0[1] + 
+			phi21[i][2] * p0[2] + 
+			phi22[i][0] * prod2[0] +
+			phi22[i][1] * prod2[1] +
+			phi22[i][2] * prod2[2];
+	}
+
+	std::array<std::array<double, 3>, 2> out;
+
+	out[0] = prod2;
+	out[1] = dpburn1;
 
 	return out;
 }
@@ -314,120 +300,70 @@ int main() {
 	);
 
 	// Rocket pod
+
+	// BFGS
+	std::array<std::array<double, 2>, 2> invhessian;
+
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) {
+			invhessian[i][j] = (i == j) ? 1 : 0;
+		}
+	}
+
 	std::array<double, 6> podstate = getmoonejecstate(baselat, baselon, ejectime, baseheading, ejecvel);
-
 	std::vector<double> impulsetimes = {5000, 472000};
+	std::array<double, 6> podburn0, podburn1;
+	std::array<double, 3> impulse0, impulse1, pder0;
 
-	std::array<double, 6> podburn0 = propagateNbody(podstate, ejectime, impulsetimes[0], 200, METHOD_DOPRI8);
-	std::array<double, 6> podburn0init = podburn0;
+	double dp0 = 0, dp1 = 0;
 
-	std::array<double, 6> depotburn1 = stateattime(ys, impulsetimes[1]);
+	for (int it2 = 0; it2 < 10; it2++) {
+		const double coeff = 2e5;
 
-	double mag;
+		impulsetimes[0] += dp0 * coeff;
+		impulsetimes[1] += dp1 * coeff;
 
-	std::array<double, 6> podburn1;
+		std::array<double, 6> podburn0init = propagateNbody(podstate, ejectime, impulsetimes[0], 200, METHOD_DOPRI8);
+		podburn0 = podburn0init;
 
-	for (int it = 0; it < 50; it++) {
+		std::array<double, 6> depotburn1 = stateattime(ys, impulsetimes[1]);
+
+		std::array<double, 3> burn = target(podburn0init, depotburn1, impulsetimes[0], impulsetimes[1]);
+
+		for (int i = 0; i < 3; i++) {
+			podburn0[i + 3] += burn[i];
+		}
+
 		podburn1 = propagateNbody(podburn0, impulsetimes[0], impulsetimes[1], 250, METHOD_DOPRI8);
 
-		std::array<std::array<double, 6>, 6> phi = estimatestatetransmatrix(impulsetimes[0], impulsetimes[1], podburn0, 250);
-		std::array<std::array<double, 3>, 3> phi12;
+		double dv1 = distance3(&podburn0[3], &podburn0init[3]);
+		double dv2 = distance3(&podburn1[3], &depotburn1[3]);
+
+		std::cout << impulsetimes[0] << " " << impulsetimes[1] << "\n";
+		std::cout << "Burn 1: " << dv1 << " km/s\n";
+		std::cout << "Burn 2: " << dv2 << " km/s\n";
+		std::cout << "Total: " << dv1 + dv2 << " km/s\n";
 
 		for (int i = 0; i < 3; i++) {
-			for (int j = 0; j < 3; j++) {
-				phi12[i][j] = phi[i][j + 3];
-			}
+			impulse0[i] = (podburn0[i + 3] - podburn0init[i + 3]) / dv1;
+			impulse1[i] = (depotburn1[i + 3] - podburn1[i + 3]) / dv2;
 		}
 
-		std::array<std::array<double, 3>, 3> phi12inv = inv3(phi12);
-		std::array<double, 3> deltas;
+		std::array<std::array<double, 3>, 2> pders = targetprimer(impulse0, impulse1, podburn0, impulsetimes[0], impulsetimes[1]);
+		pder0 = pders[0];
 
-		for (int i = 0; i < 3; i++) {
-			deltas[i] = 
-				phi12inv[i][0] * (depotburn1[0] - podburn1[0]) +
-				phi12inv[i][1] * (depotburn1[1] - podburn1[1]) +
-				phi12inv[i][2] * (depotburn1[2] - podburn1[2]);
-		}
+		dp0 = dot3(impulse0.data(), pders[0].data());
+		dp1 = dot3(impulse1.data(), pders[1].data());
 
-		mag = std::sqrt(deltas[0] * deltas[0] + deltas[1] * deltas[1] + deltas[2] * deltas[2]);
-		double mult = mag < 0.01 ? 1 : 0.01 / mag;
+		std::cout << dp0 << " " << dp1 << "\n";
 
-		for (int i = 0; i < 3; i++) {
-			podburn0[i + 3] += deltas[i] * mult;
-		}
+		const double maxpderivative = 6e-4;
 
-		if (mag < 1e-10) break;
+		if (dp0 > maxpderivative) dp0 = maxpderivative;
+		if (dp0 < -maxpderivative) dp0 = -maxpderivative;
+		if (dp1 > maxpderivative) dp1 = maxpderivative;
+		if (dp1 < -maxpderivative) dp1 = -maxpderivative;
 	}
-
-	podburn1 = propagateNbody(podburn0, impulsetimes[0], impulsetimes[1], 250, METHOD_DOPRI8);
-
-	double dv1 = distance(&podburn0[3], &podburn0init[3]);
-	double dv2 = distance(&podburn1[3], &depotburn1[3]);
-
-	std::cout << "Burn 1: " << dv1 << " km/s\n";
-	std::cout << "Burn 2: " << dv2 << " km/s\n";
-	std::cout << "Total: " << dv1 + dv2 << " km/s\n";
-
-	std::array<double, 3> impulse0, impulse1, prod, prod2;
-	for (int i = 0; i < 3; i++) {
-		impulse0[i] = (podburn0[i + 3] - podburn0init[i + 3]) / dv1;
-		impulse1[i] = (depotburn1[i + 3] - podburn1[i + 3]) / dv2;
-	}
-
-	std::array<std::array<double, 6>, 6> phi = estimatestatetransmatrix(impulsetimes[0], impulsetimes[1], podburn0, 250);
-	std::array<std::array<double, 3>, 3> phi11, phi12, phi21, phi22;
-
-	for (int i = 0; i < 3; i++) {
-		for (int j = 0; j < 3; j++) {
-			phi11[i][j] = phi[i][j];
-			phi12[i][j] = phi[i][j + 3];
-			phi21[i][j] = phi[i + 3][j];
-			phi22[i][j] = phi[i + 3][j + 3];
-		}
-	}
-
-	std::array<std::array<double, 3>, 3> phi12inv = inv3(phi12);
-
-	for (int i = 0; i < 3; i++) {
-		prod[i] = 
-			phi11[i][0] * impulse0[0] + 
-			phi11[i][1] * impulse0[1] + 
-			phi11[i][2] * impulse0[2];
-
-		prod[i] = impulse1[i] - prod[i];
-	}
-
-	for (int i = 0; i < 3; i++) {
-		prod2[i] = 
-			phi12inv[i][0] * prod[0] + 
-			phi12inv[i][1] * prod[1] + 
-			phi12inv[i][2] * prod[2];
-	}
-
-	std::array<double, 3> dpburn1;
-
-	for (int i = 0; i < 3; i++) {
-		dpburn1[i] = 
-			phi21[i][0] * impulse0[0] + 
-			phi21[i][1] * impulse0[1] + 
-			phi21[i][2] * impulse0[2] + 
-			phi22[i][0] * prod2[0] +
-			phi22[i][1] * prod2[1] +
-			phi22[i][2] * prod2[2];
-	}
-
-	double dp0 = dot(impulse0.data(), prod2.data());
-	double dp1 = dot(impulse1.data(), dpburn1.data());
-
-	const double maxpderivative = 1e-5;
-
-	if (dp0 > maxpderivative) dp0 = maxpderivative;
-	if (dp0 < -maxpderivative) dp0 = -maxpderivative;
-	if (dp1 > maxpderivative) dp1 = maxpderivative;
-	if (dp1 < -maxpderivative) dp1 = -maxpderivative;
-
-	std::cout << dp0 << " " << dp1 << "\n";
-
 	//
 
 	std::vector<double> y0pod = {
@@ -435,7 +371,7 @@ int main() {
 		podburn0[0], podburn0[1], podburn0[2],
 		podburn0[3], podburn0[4], podburn0[5],
 		impulse0[0], impulse0[1], impulse0[2],
-		prod2[0], prod2[1], prod2[2]
+		pder0[0], pder0[1], pder0[2]
 	};
 
 	std::vector<std::vector<double> > orbito = integraterecord(
