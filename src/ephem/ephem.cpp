@@ -31,6 +31,14 @@ void logstate(const std::array<double, 6>& state) {
 	std::cout << "Velocity: <" << state[3] << ", " << state[4] << ", " << state[5] << "> km/s\n";
 }
 
+void logposearthref(const std::array<double, 3>& logpos, double et) {
+	double state[6];
+
+	getstate(399, et, state);
+
+	std::cout << "Position: <" << logpos[0] - state[0] << ", " << logpos[1] - state[1] << ", " << logpos[2] - state[2] << "> km\n";
+}
+
 void logstateearthref(const std::array<double, 6>& logstate, double et) {
 	double state[6];
 

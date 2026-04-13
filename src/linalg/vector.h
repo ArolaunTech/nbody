@@ -1,4 +1,4 @@
 #pragma once
 
-double dot3(double* a, double* b);
-double distance3(double* a, double* b);
+double dot3(const double* a, const double* b);
+double distance3(const double* a, const double* b);
